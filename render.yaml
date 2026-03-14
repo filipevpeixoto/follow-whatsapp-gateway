@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: follow-whatsapp-gateway
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    envVars:
+      - key: PORT
+        value: "3002"
+      - key: GATEWAY_API_SECRET
+        generateValue: true
+    disk:
+      name: whatsapp-sessions
+      mountPath: /app/.wwebjs_auth
+      sizeGB: 1
