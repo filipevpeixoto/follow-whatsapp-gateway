@@ -10,7 +10,7 @@ app.use(cors())
 app.use(express.json())
 
 const PORT = process.env.PORT || 3002
-const API_SECRET = process.env.GATEWAY_API_SECRET || ''
+const API_SECRET = process.env.GATEWAY_SECRET || ''
 
 // ── Auth middleware ──────────────────────────────────────────────────────────
 
@@ -37,8 +37,9 @@ function getSession(pastorId) {
 function createSession(pastorId) {
   if (sessions.has(pastorId)) {
     const existing = sessions.get(pastorId)
-    if (existing.status === 'ready') return existing
-    // If stuck in qr/initializing, destroy and recreate
+    // Don't destroy active sessions
+    if (['ready', 'qr', 'initializing'].includes(existing.status)) return existing
+    // Only recreate if disconnected or errored
     try { existing.client.destroy() } catch { /* ignore */ }
     sessions.delete(pastorId)
   }
