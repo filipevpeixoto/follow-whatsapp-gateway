@@ -4,6 +4,7 @@ import QRCode from 'qrcode'
 import { mkdirSync, existsSync } from 'fs'
 import path from 'path'
 import pino from 'pino'
+import { resolveTargetJid } from './phone.js'
 
 const baileys = await import('@whiskeysockets/baileys')
 const makeWASocket = baileys.default
@@ -199,9 +200,9 @@ app.post('/send', async (req, res) => {
   }
 
   try {
-    const jid = formatJid(phone)
+    const jid = await resolveTargetJid(session.socket, phone)
     await session.socket.sendMessage(jid, { text: message })
-    res.json({ ok: true })
+    res.json({ ok: true, jid })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -224,7 +225,7 @@ app.post('/broadcast', async (req, res) => {
 
   for (const target of targets) {
     try {
-      const jid = formatJid(target.phone)
+      const jid = await resolveTargetJid(session.socket, target.phone)
       await session.socket.sendMessage(jid, { text: message })
       sent++
     } catch (err) {
@@ -238,11 +239,6 @@ app.post('/broadcast', async (req, res) => {
 })
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-function formatJid(phone) {
-  const digits = phone.replace(/\D/g, '')
-  return `${digits}@s.whatsapp.net`
-}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
