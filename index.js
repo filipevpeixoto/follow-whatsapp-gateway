@@ -46,6 +46,10 @@ function createSession(pastorId) {
 
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: pastorId }),
+    webVersionCache: {
+      type: 'local',
+      path: './.wwebjs_auth/.wwebjs_cache',
+    },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -55,8 +59,13 @@ function createSession(pastorId) {
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-first-run',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--metrics-recording-only',
         '--no-zygote',
-        '--single-process',
       ],
     },
   })
@@ -109,10 +118,13 @@ function createSession(pastorId) {
     console.log(`[${pastorId}] Disconnected:`, reason)
   })
 
-  client.initialize().catch((err) => {
+  console.log(`[${pastorId}] Starting client.initialize()...`)
+  client.initialize().then(() => {
+    console.log(`[${pastorId}] client.initialize() resolved`)
+  }).catch((err) => {
     session.status = 'disconnected'
     session.error = `Erro ao inicializar: ${err.message}`
-    console.error(`[${pastorId}] Init error:`, err)
+    console.error(`[${pastorId}] Init error:`, err.message)
   })
 
   sessions.set(pastorId, session)
