@@ -1,9 +1,18 @@
 import express from 'express'
 import cors from 'cors'
-import pkg from 'whatsapp-web.js'
 import QRCode from 'qrcode'
+import { mkdirSync, existsSync } from 'fs'
+import path from 'path'
+import pino from 'pino'
 
-const { Client, LocalAuth } = pkg
+const baileys = await import('@whiskeysockets/baileys')
+const makeWASocket = baileys.default
+const {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+} = baileys
 
 const app = express()
 app.use(cors())
@@ -11,6 +20,9 @@ app.use(express.json())
 
 const PORT = process.env.PORT || 3002
 const API_SECRET = process.env.GATEWAY_SECRET || ''
+const AUTH_DIR = process.env.AUTH_DIR || './.wwebjs_auth'
+
+const logger = pino({ level: 'warn' })
 
 // ── Auth middleware ──────────────────────────────────────────────────────────
 
@@ -26,7 +38,7 @@ function authMiddleware(req, res, next) {
 app.use(authMiddleware)
 
 // ── Session store ───────────────────────────────────────────────────────────
-// Key: pastorId (string), Value: { client, qr, status, phone }
+// Key: pastorId (string), Value: { socket, qr, qrDataUrl, status, phone, error }
 
 const sessions = new Map()
 
@@ -34,116 +46,109 @@ function getSession(pastorId) {
   return sessions.get(pastorId) || null
 }
 
-function createSession(pastorId) {
+async function createSession(pastorId) {
   if (sessions.has(pastorId)) {
     const existing = sessions.get(pastorId)
-    // Don't destroy active sessions
     if (['ready', 'qr', 'initializing'].includes(existing.status)) return existing
-    // Only recreate if disconnected or errored
-    try { existing.client.destroy() } catch { /* ignore */ }
+    try { existing.socket?.end() } catch { /* ignore */ }
     sessions.delete(pastorId)
   }
 
-  const client = new Client({
-    authStrategy: new LocalAuth({ clientId: pastorId }),
-    webVersionCache: {
-      type: 'local',
-      path: './.wwebjs_auth/.wwebjs_cache',
-    },
-    puppeteer: {
-      headless: true,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-first-run',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--disable-sync',
-        '--disable-translate',
-        '--metrics-recording-only',
-        '--no-zygote',
-      ],
-    },
-  })
+  const sessionDir = path.join(AUTH_DIR, `session-${pastorId}`)
+  if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
 
   const session = {
-    client,
+    socket: null,
     qr: null,
     qrDataUrl: null,
-    status: 'initializing', // initializing | qr | ready | disconnected
+    status: 'initializing',
     phone: null,
     error: null,
   }
+  sessions.set(pastorId, session)
 
-  client.on('qr', async (qr) => {
-    session.qr = qr
-    session.status = 'qr'
-    session.error = null
-    try {
-      session.qrDataUrl = await QRCode.toDataURL(qr, { width: 300, margin: 2 })
-    } catch {
-      session.qrDataUrl = null
-    }
-    console.log(`[${pastorId}] QR code generated`)
-  })
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir)
+    const { version } = await fetchLatestBaileysVersion()
 
-  client.on('ready', () => {
-    session.status = 'ready'
-    session.qr = null
-    session.qrDataUrl = null
-    session.error = null
-    const info = client.info
-    session.phone = info?.wid?.user || null
-    console.log(`[${pastorId}] Connected as ${session.phone}`)
-  })
+    const socket = makeWASocket({
+      version,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
+      },
+      logger,
+      printQRInTerminal: false,
+      browser: ['Follow', 'Chrome', '125.0.0'],
+      generateHighQualityLinkPreview: false,
+    })
 
-  client.on('authenticated', () => {
-    console.log(`[${pastorId}] Authenticated`)
-  })
+    session.socket = socket
 
-  client.on('auth_failure', (msg) => {
-    session.status = 'disconnected'
-    session.error = `Falha na autenticação: ${msg}`
-    console.error(`[${pastorId}] Auth failure:`, msg)
-  })
+    socket.ev.on('creds.update', saveCreds)
 
-  client.on('disconnected', (reason) => {
-    session.status = 'disconnected'
-    session.error = `Desconectado: ${reason}`
-    session.phone = null
-    console.log(`[${pastorId}] Disconnected:`, reason)
-  })
+    socket.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr: qrCode } = update
 
-  console.log(`[${pastorId}] Starting client.initialize()...`)
-  client.initialize().then(() => {
-    console.log(`[${pastorId}] client.initialize() resolved`)
-  }).catch((err) => {
+      if (qrCode) {
+        session.qr = qrCode
+        session.status = 'qr'
+        session.error = null
+        try {
+          session.qrDataUrl = await QRCode.toDataURL(qrCode, { width: 300, margin: 2 })
+        } catch {
+          session.qrDataUrl = null
+        }
+        console.log(`[${pastorId}] QR code generated`)
+      }
+
+      if (connection === 'open') {
+        session.status = 'ready'
+        session.qr = null
+        session.qrDataUrl = null
+        session.error = null
+        session.phone = socket.user?.id?.split(':')[0] || socket.user?.id?.split('@')[0] || null
+        console.log(`[${pastorId}] Connected as ${session.phone}`)
+      }
+
+      if (connection === 'close') {
+        const statusCode = lastDisconnect?.error?.output?.statusCode
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut
+
+        console.log(`[${pastorId}] Connection closed. Status: ${statusCode}. Reconnect: ${shouldReconnect}`)
+
+        if (shouldReconnect) {
+          // Reconnect — remove old session object and recreate
+          sessions.delete(pastorId)
+          setTimeout(() => createSession(pastorId), 2000)
+        } else {
+          session.status = 'disconnected'
+          session.error = 'Desconectado pelo WhatsApp. Escaneie o QR code novamente.'
+          session.phone = null
+          console.log(`[${pastorId}] Logged out`)
+        }
+      }
+    })
+  } catch (err) {
     session.status = 'disconnected'
     session.error = `Erro ao inicializar: ${err.message}`
     console.error(`[${pastorId}] Init error:`, err.message)
-  })
+  }
 
-  sessions.set(pastorId, session)
   return session
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 
-// Health check
 app.get('/health', (_req, res) => {
   res.json({ ok: true, sessions: sessions.size })
 })
 
-// Start a session and get QR code
-app.post('/session/start', (req, res) => {
+app.post('/session/start', async (req, res) => {
   const { pastorId } = req.body
   if (!pastorId) return res.status(400).json({ error: 'pastorId é obrigatório' })
 
-  const session = createSession(pastorId)
+  const session = await createSession(pastorId)
   res.json({
     status: session.status,
     phone: session.phone,
@@ -151,7 +156,6 @@ app.post('/session/start', (req, res) => {
   })
 })
 
-// Get session status (polling)
 app.get('/session/status/:pastorId', (req, res) => {
   const session = getSession(req.params.pastorId)
   if (!session) {
@@ -165,7 +169,6 @@ app.get('/session/status/:pastorId', (req, res) => {
   })
 })
 
-// Disconnect session
 app.post('/session/disconnect', async (req, res) => {
   const { pastorId } = req.body
   if (!pastorId) return res.status(400).json({ error: 'pastorId é obrigatório' })
@@ -174,14 +177,16 @@ app.post('/session/disconnect', async (req, res) => {
   if (!session) return res.json({ ok: true, message: 'Sessão não encontrada' })
 
   try {
-    await session.client.destroy()
+    await session.socket?.logout()
+  } catch { /* ignore */ }
+  try {
+    session.socket?.end()
   } catch { /* ignore */ }
   sessions.delete(pastorId)
 
   res.json({ ok: true })
 })
 
-// Send a single message
 app.post('/send', async (req, res) => {
   const { pastorId, phone, message } = req.body
   if (!pastorId || !phone || !message) {
@@ -194,18 +199,16 @@ app.post('/send', async (req, res) => {
   }
 
   try {
-    const chatId = formatChatId(phone)
-    await session.client.sendMessage(chatId, message)
+    const jid = formatJid(phone)
+    await session.socket.sendMessage(jid, { text: message })
     res.json({ ok: true })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
-// Broadcast to multiple phones
 app.post('/broadcast', async (req, res) => {
   const { pastorId, targets, message } = req.body
-  // targets: [{ phone, name }]
   if (!pastorId || !targets || !message) {
     return res.status(400).json({ error: 'pastorId, targets e message são obrigatórios' })
   }
@@ -221,14 +224,13 @@ app.post('/broadcast', async (req, res) => {
 
   for (const target of targets) {
     try {
-      const chatId = formatChatId(target.phone)
-      await session.client.sendMessage(chatId, message)
+      const jid = formatJid(target.phone)
+      await session.socket.sendMessage(jid, { text: message })
       sent++
     } catch (err) {
       failed++
       errors.push(`${target.name || target.phone}: ${err.message}`)
     }
-    // Small delay to avoid rate limiting
     await sleep(1000)
   }
 
@@ -237,10 +239,9 @@ app.post('/broadcast', async (req, res) => {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function formatChatId(phone) {
-  // Remove non-digits, ensure it ends with @c.us
+function formatJid(phone) {
   const digits = phone.replace(/\D/g, '')
-  return `${digits}@c.us`
+  return `${digits}@s.whatsapp.net`
 }
 
 function sleep(ms) {
