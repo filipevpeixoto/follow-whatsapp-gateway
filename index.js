@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import QRCode from 'qrcode'
-import { mkdirSync, existsSync } from 'fs'
+import { existsSync, mkdirSync, rmSync } from 'fs'
 import path from 'path'
 import pino from 'pino'
 import { resolveTargetJid } from './phone.js'
@@ -22,6 +22,7 @@ app.use(express.json())
 const PORT = process.env.PORT || 3002
 const API_SECRET = process.env.GATEWAY_SECRET || ''
 const AUTH_DIR = process.env.AUTH_DIR || './.wwebjs_auth'
+const MANUAL_DISCONNECT_GRACE_MS = Number(process.env.MANUAL_DISCONNECT_GRACE_MS || 1500)
 
 const logger = pino({ level: 'warn' })
 
@@ -47,6 +48,56 @@ function getSession(pastorId) {
   return sessions.get(pastorId) || null
 }
 
+function getSessionDir(pastorId) {
+  return path.join(AUTH_DIR, `session-${pastorId}`)
+}
+
+function clearPersistedSession(pastorId) {
+  const sessionDir = getSessionDir(pastorId)
+  if (!existsSync(sessionDir)) return false
+
+  rmSync(sessionDir, { recursive: true, force: true })
+  return true
+}
+
+async function destroySession(pastorId, { clearAuth = false } = {}) {
+  const session = getSession(pastorId)
+
+  if (session) {
+    session.manualDisconnect = true
+    session.status = 'disconnected'
+    session.qr = null
+    session.qrDataUrl = null
+    session.phone = null
+    session.error = clearAuth
+      ? 'Sessão desconectada. Escaneie o QR code novamente.'
+      : 'Sessão desconectada.'
+
+    try {
+      await session.socket?.logout()
+    } catch {
+      /* ignore */
+    }
+
+    try {
+      session.socket?.end()
+    } catch {
+      /* ignore */
+    }
+  }
+
+  sessions.delete(pastorId)
+
+  if (!clearAuth) {
+    return { hadSession: Boolean(session), clearedAuth: false }
+  }
+
+  // Wait a moment so Baileys finishes the logout flow before we remove auth files.
+  await sleep(MANUAL_DISCONNECT_GRACE_MS)
+  const clearedAuth = clearPersistedSession(pastorId)
+  return { hadSession: Boolean(session), clearedAuth }
+}
+
 async function createSession(pastorId) {
   if (sessions.has(pastorId)) {
     const existing = sessions.get(pastorId)
@@ -55,7 +106,7 @@ async function createSession(pastorId) {
     sessions.delete(pastorId)
   }
 
-  const sessionDir = path.join(AUTH_DIR, `session-${pastorId}`)
+  const sessionDir = getSessionDir(pastorId)
   if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
 
   const session = {
@@ -65,6 +116,7 @@ async function createSession(pastorId) {
     status: 'initializing',
     phone: null,
     error: null,
+    manualDisconnect: false,
   }
   sessions.set(pastorId, session)
 
@@ -114,9 +166,19 @@ async function createSession(pastorId) {
 
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut
+        const isCurrentSession = sessions.get(pastorId) === session
+        const shouldReconnect = !session.manualDisconnect && statusCode !== DisconnectReason.loggedOut
 
         console.log(`[${pastorId}] Connection closed. Status: ${statusCode}. Reconnect: ${shouldReconnect}`)
+
+        if (!isCurrentSession) {
+          return
+        }
+
+        if (session.manualDisconnect) {
+          console.log(`[${pastorId}] Manual disconnect completed`)
+          return
+        }
 
         if (shouldReconnect) {
           // Reconnect — remove old session object and recreate
@@ -174,18 +236,8 @@ app.post('/session/disconnect', async (req, res) => {
   const { pastorId } = req.body
   if (!pastorId) return res.status(400).json({ error: 'pastorId é obrigatório' })
 
-  const session = getSession(pastorId)
-  if (!session) return res.json({ ok: true, message: 'Sessão não encontrada' })
-
-  try {
-    await session.socket?.logout()
-  } catch { /* ignore */ }
-  try {
-    session.socket?.end()
-  } catch { /* ignore */ }
-  sessions.delete(pastorId)
-
-  res.json({ ok: true })
+  const result = await destroySession(pastorId, { clearAuth: true })
+  res.json({ ok: true, ...result })
 })
 
 app.post('/send', async (req, res) => {
