@@ -325,6 +325,30 @@ function sleep(ms) {
 
 // ── Start ───────────────────────────────────────────────────────────────────
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`WhatsApp Gateway running on port ${PORT}`)
+
+  // Auto-restore sessions from DB on startup
+  if (BACKEND_URL) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json',
+        ...(API_SECRET ? { 'x-gateway-secret': API_SECRET } : {}),
+      }
+      const res = await fetch(`${BACKEND_URL}/whatsapp/auth-state/sessions`, { headers })
+      if (res.ok) {
+        const { sessionIds } = await res.json()
+        for (const sessionId of sessionIds) {
+          console.log(`[${sessionId}] Auto-restoring session from DB...`)
+          try {
+            await createSession(sessionId)
+          } catch (err) {
+            console.error(`[${sessionId}] Failed to restore:`, err.message)
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch session list for auto-restore:', err.message)
+    }
+  }
 })
