@@ -187,7 +187,12 @@ async function createSession(pastorId) {
         if (shouldReconnect) {
           // Reconnect — remove old session object and recreate
           sessions.delete(pastorId)
-          clearPersistedSession(pastorId)
+          // Only clear persisted auth if QR expired (401 without ever connecting).
+          // For other errors (515 stream, network, etc.) keep auth files so the
+          // handshake can resume without requiring a new QR scan.
+          if (statusCode === DisconnectReason.loggedOut && !wasEverConnected) {
+            clearPersistedSession(pastorId)
+          }
           setTimeout(() => createSession(pastorId), 2000)
         } else {
           session.status = 'disconnected'
