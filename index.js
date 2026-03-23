@@ -167,9 +167,13 @@ async function createSession(pastorId) {
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode
         const isCurrentSession = sessions.get(pastorId) === session
-        const shouldReconnect = !session.manualDisconnect && statusCode !== DisconnectReason.loggedOut
+        // 401 = loggedOut. But if we never connected (phone is null), it just means
+        // the QR codes expired — we should retry, not give up.
+        const wasEverConnected = Boolean(session.phone)
+        const shouldReconnect = !session.manualDisconnect &&
+          (statusCode !== DisconnectReason.loggedOut || !wasEverConnected)
 
-        console.log(`[${pastorId}] Connection closed. Status: ${statusCode}. Reconnect: ${shouldReconnect}`)
+        console.log(`[${pastorId}] Connection closed. Status: ${statusCode}. Reconnect: ${shouldReconnect}. WasConnected: ${wasEverConnected}`)
 
         if (!isCurrentSession) {
           return
@@ -183,6 +187,7 @@ async function createSession(pastorId) {
         if (shouldReconnect) {
           // Reconnect — remove old session object and recreate
           sessions.delete(pastorId)
+          clearPersistedSession(pastorId)
           setTimeout(() => createSession(pastorId), 2000)
         } else {
           session.status = 'disconnected'
