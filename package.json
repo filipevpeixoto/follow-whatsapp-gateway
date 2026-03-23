@@ -9,7 +9,7 @@
     "dev": "node --watch index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.21",
+    "@whiskeysockets/baileys": "^6.17.16",
     "cors": "^2.8.6",
     "express": "^4.22.1",
     "pino": "^9.6.0",
