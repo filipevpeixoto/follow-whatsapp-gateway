@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, rmSync } from 'fs'
 import path from 'path'
 import pino from 'pino'
 import { resolveTargetJid } from './phone.js'
+import { useDbAuthState, clearDbAuthState } from './db-auth-state.js'
 
 const baileys = await import('@whiskeysockets/baileys')
 const makeWASocket = baileys.default
@@ -23,6 +24,7 @@ const PORT = process.env.PORT || 3002
 const API_SECRET = process.env.GATEWAY_SECRET || ''
 const AUTH_DIR = process.env.AUTH_DIR || './.wwebjs_auth'
 const MANUAL_DISCONNECT_GRACE_MS = Number(process.env.MANUAL_DISCONNECT_GRACE_MS || 1500)
+const BACKEND_URL = process.env.BACKEND_URL || ''
 
 const logger = pino({ level: 'warn' })
 
@@ -52,7 +54,17 @@ function getSessionDir(pastorId) {
   return path.join(AUTH_DIR, `session-${pastorId}`)
 }
 
-function clearPersistedSession(pastorId) {
+async function clearPersistedSession(pastorId) {
+  if (BACKEND_URL) {
+    try {
+      await clearDbAuthState(pastorId, BACKEND_URL, API_SECRET)
+      console.log(`[${pastorId}] Cleared DB auth state`)
+      return true
+    } catch (err) {
+      console.error(`[${pastorId}] Failed to clear DB auth state:`, err.message)
+      return false
+    }
+  }
   const sessionDir = getSessionDir(pastorId)
   if (!existsSync(sessionDir)) return false
 
@@ -94,7 +106,7 @@ async function destroySession(pastorId, { clearAuth = false } = {}) {
 
   // Wait a moment so Baileys finishes the logout flow before we remove auth files.
   await sleep(MANUAL_DISCONNECT_GRACE_MS)
-  const clearedAuth = clearPersistedSession(pastorId)
+  const clearedAuth = await clearPersistedSession(pastorId)
   return { hadSession: Boolean(session), clearedAuth }
 }
 
@@ -105,9 +117,6 @@ async function createSession(pastorId) {
     try { existing.socket?.end() } catch { /* ignore */ }
     sessions.delete(pastorId)
   }
-
-  const sessionDir = getSessionDir(pastorId)
-  if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
 
   const session = {
     socket: null,
@@ -121,7 +130,15 @@ async function createSession(pastorId) {
   sessions.set(pastorId, session)
 
   try {
-    const { state, saveCreds } = await useMultiFileAuthState(sessionDir)
+    let state, saveCreds
+    if (BACKEND_URL) {
+      console.log(`[${pastorId}] Using DB auth state via ${BACKEND_URL}`)
+      ;({ state, saveCreds } = await useDbAuthState(pastorId, BACKEND_URL, API_SECRET))
+    } else {
+      const sessionDir = getSessionDir(pastorId)
+      if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
+      ;({ state, saveCreds } = await useMultiFileAuthState(sessionDir))
+    }
     const { version } = await fetchLatestBaileysVersion()
 
     const socket = makeWASocket({
@@ -191,7 +208,7 @@ async function createSession(pastorId) {
           // For other errors (515 stream, network, etc.) keep auth files so the
           // handshake can resume without requiring a new QR scan.
           if (statusCode === DisconnectReason.loggedOut && !wasEverConnected) {
-            clearPersistedSession(pastorId)
+            await clearPersistedSession(pastorId)
           }
           setTimeout(() => createSession(pastorId), 2000)
         } else {
