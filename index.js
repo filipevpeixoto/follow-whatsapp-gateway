@@ -202,7 +202,7 @@ async function createSession(pastorId) {
             from = resolvedPhone
             console.log(`[${pastorId}] Resolved LID ${remoteJid} → ${from}`)
           } else {
-            console.log(`[${pastorId}] LID ${remoteJid} not yet in contacts map`)
+            console.log(`[${pastorId}] LID ${remoteJid} not in contacts map, passing as-is`)
           }
         }
         if (!from) continue
@@ -247,6 +247,10 @@ async function createSession(pastorId) {
         session.error = null
         session.phone = socket.user?.id?.split(':')[0] || socket.user?.id?.split('@')[0] || null
         console.log(`[${pastorId}] Connected as ${session.phone}`)
+        // Request contacts sync to populate LID map
+        try {
+          await socket.sendPresenceUpdate('available')
+        } catch { /* ignore */ }
       }
 
       if (connection === 'close') {
