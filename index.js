@@ -165,17 +165,18 @@ async function createSession(pastorId) {
     socket.ev.on('creds.update', saveCreds)
 
     socket.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
-      // handle both 'notify' (real-time) and 'append' (catch-up after reconnect)
-      if (type !== 'notify' && type !== 'append') return
+      console.log(`[${pastorId}] messages.upsert fired: type=${type} count=${msgs.length}`)
       for (const msg of msgs) {
-        if (msg.key.fromMe) continue
         const remoteJid = msg.key.remoteJid || ''
-        if (remoteJid.endsWith('@g.us')) continue // skip group messages
-        const from = remoteJid.replace('@s.whatsapp.net', '')
+        const fromMe = msg.key.fromMe
         const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || ''
-        if (!text || !from) continue
-        console.log(`[${pastorId}] Incoming message from ${from}: ${text}`)
-        logMessage(pastorId, from, text)
+        console.log(`[${pastorId}] msg: fromMe=${fromMe} jid=${remoteJid} text=${text?.slice(0, 50)}`)
+        if (fromMe) continue
+        if (remoteJid.endsWith('@g.us')) continue
+        const from = remoteJid.replace('@s.whatsapp.net', '')
+        if (!from) continue
+        logMessage(pastorId, from, text || '(no text)')
+        if (!text) continue
         if (BACKEND_URL) {
           try {
             await fetch(`${BACKEND_URL}/whatsapp/system-incoming`, {
