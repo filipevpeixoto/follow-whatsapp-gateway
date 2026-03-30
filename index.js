@@ -185,7 +185,7 @@ async function createSession(pastorId) {
                 'Content-Type': 'application/json',
                 ...(API_SECRET ? { 'x-gateway-secret': API_SECRET } : {}),
               },
-              body: JSON.stringify({ pastorId, from, text }),
+              body: JSON.stringify({ pastorId, from, text, replyJid: remoteJid }),
             })
           } catch (err) {
             console.error(`[${pastorId}] Failed to forward incoming message:`, err.message)
@@ -321,6 +321,23 @@ app.post('/send', async (req, res) => {
 
   try {
     const jid = await resolveTargetJid(session.socket, phone)
+    await session.socket.sendMessage(jid, { text: message })
+    res.json({ ok: true, jid })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/send-jid', async (req, res) => {
+  const { pastorId, jid, message } = req.body
+  if (!pastorId || !jid || !message) {
+    return res.status(400).json({ error: 'pastorId, jid e message são obrigatórios' })
+  }
+  const session = getSession(pastorId)
+  if (!session || session.status !== 'ready') {
+    return res.status(400).json({ error: 'WhatsApp não conectado.' })
+  }
+  try {
     await session.socket.sendMessage(jid, { text: message })
     res.json({ ok: true, jid })
   } catch (err) {
