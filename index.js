@@ -157,6 +157,30 @@ async function createSession(pastorId) {
 
     socket.ev.on('creds.update', saveCreds)
 
+    socket.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
+      if (type !== 'notify') return
+      for (const msg of msgs) {
+        if (msg.key.fromMe) continue
+        const from = msg.key.remoteJid?.replace('@s.whatsapp.net', '') || msg.key.remoteJid
+        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || ''
+        if (!text || !from) continue
+        if (BACKEND_URL) {
+          try {
+            await fetch(`${BACKEND_URL}/whatsapp/system-incoming`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(API_SECRET ? { 'x-gateway-secret': API_SECRET } : {}),
+              },
+              body: JSON.stringify({ pastorId, from, text }),
+            })
+          } catch (err) {
+            console.error(`[${pastorId}] Failed to forward incoming message:`, err.message)
+          }
+        }
+      }
+    })
+
     socket.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr: qrCode } = update
 
