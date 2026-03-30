@@ -46,6 +46,13 @@ app.use(authMiddleware)
 
 const sessions = new Map()
 
+// ── Recent messages log (last 20, for diagnostics) ──────────────────────────
+const recentMessages = []
+function logMessage(pastorId, from, text) {
+  recentMessages.push({ pastorId, from, text, at: new Date().toISOString() })
+  if (recentMessages.length > 20) recentMessages.shift()
+}
+
 function getSession(pastorId) {
   return sessions.get(pastorId) || null
 }
@@ -168,6 +175,7 @@ async function createSession(pastorId) {
         const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || ''
         if (!text || !from) continue
         console.log(`[${pastorId}] Incoming message from ${from}: ${text}`)
+        logMessage(pastorId, from, text)
         if (BACKEND_URL) {
           try {
             await fetch(`${BACKEND_URL}/whatsapp/system-incoming`, {
@@ -260,6 +268,10 @@ async function createSession(pastorId) {
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, sessions: sessions.size })
+})
+
+app.get('/debug/messages', (req, res) => {
+  res.json({ messages: recentMessages })
 })
 
 app.post('/session/start', async (req, res) => {
