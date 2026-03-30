@@ -14,6 +14,8 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  extractMessageContent,
+  getContentType,
 } = baileys
 
 const app = express()
@@ -51,6 +53,24 @@ const recentMessages = []
 function logMessage(pastorId, from, text) {
   recentMessages.push({ pastorId, from, text, at: new Date().toISOString() })
   if (recentMessages.length > 20) recentMessages.shift()
+}
+
+function extractTextFromMessage(message) {
+  const content = extractMessageContent(message)
+  const contentType = getContentType(content)
+  if (!content || !contentType) {
+    return { text: '', contentType: null }
+  }
+
+  const text =
+    (content.conversation && typeof content.conversation === 'string' ? content.conversation : '') ||
+    content.extendedTextMessage?.text ||
+    content.imageMessage?.caption ||
+    content.videoMessage?.caption ||
+    content.documentMessage?.caption ||
+    ''
+
+  return { text: text.trim(), contentType }
 }
 
 function getSession(pastorId) {
@@ -190,8 +210,10 @@ async function createSession(pastorId) {
       for (const msg of msgs) {
         const remoteJid = msg.key.remoteJid || ''
         const fromMe = msg.key.fromMe
-        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || ''
-        console.log(`[${pastorId}] msg: fromMe=${fromMe} jid=${remoteJid} text=${text?.slice(0, 50)}`)
+        const { text, contentType } = extractTextFromMessage(msg.message)
+        console.log(
+          `[${pastorId}] msg: fromMe=${fromMe} jid=${remoteJid} type=${contentType || 'unknown'} text=${text.slice(0, 50)}`,
+        )
         if (fromMe) continue
         if (remoteJid.endsWith('@g.us')) continue
         // Resolve @lid JID to phone number using contacts map
@@ -206,11 +228,14 @@ async function createSession(pastorId) {
           }
         }
         if (!from) continue
-        logMessage(pastorId, from, text || '(no text)')
-        if (!text) continue
+        logMessage(pastorId, from, text || `(no text:${contentType || 'unknown'})`)
+        if (!text) {
+          console.log(`[${pastorId}] Ignoring non-text message from ${remoteJid} (type=${contentType || 'unknown'})`)
+          continue
+        }
         if (BACKEND_URL) {
           try {
-            await fetch(`${BACKEND_URL}/whatsapp/system-incoming`, {
+            const response = await fetch(`${BACKEND_URL}/whatsapp/system-incoming`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -218,6 +243,7 @@ async function createSession(pastorId) {
               },
               body: JSON.stringify({ pastorId, from, text, replyJid: remoteJid }),
             })
+            console.log(`[${pastorId}] Forwarded incoming message to backend: status=${response.status} from=${from}`)
           } catch (err) {
             console.error(`[${pastorId}] Failed to forward incoming message:`, err.message)
           }
