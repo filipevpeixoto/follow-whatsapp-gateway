@@ -216,7 +216,7 @@ async function createSession(pastorId) {
                 'Content-Type': 'application/json',
                 ...(API_SECRET ? { 'x-gateway-secret': API_SECRET } : {}),
               },
-              body: JSON.stringify({ pastorId, from, text, replyJid: remoteJid, fromLid: remoteJid.endsWith('@lid') }),
+              body: JSON.stringify({ pastorId, from, text, replyJid: remoteJid }),
             })
           } catch (err) {
             console.error(`[${pastorId}] Failed to forward incoming message:`, err.message)
@@ -310,6 +310,13 @@ app.get('/debug/messages', (req, res) => {
   res.json({ messages: recentMessages })
 })
 
+app.get('/debug/contacts/:pastorId', (req, res) => {
+  const session = getSession(req.params.pastorId)
+  if (!session) return res.status(404).json({ error: 'Session not found' })
+  const map = Object.fromEntries(session.lidToPhone)
+  res.json({ size: session.lidToPhone.size, map })
+})
+
 app.post('/session/start', async (req, res) => {
   const { pastorId } = req.body
   if (!pastorId) return res.status(400).json({ error: 'pastorId é obrigatório' })
@@ -373,8 +380,20 @@ app.post('/send-jid', async (req, res) => {
     return res.status(400).json({ error: 'WhatsApp não conectado.' })
   }
   try {
-    await session.socket.sendMessage(jid, { text: message })
-    res.json({ ok: true, jid })
+    // For @lid JIDs, try to find the real @s.whatsapp.net JID from contacts map
+    let targetJid = jid
+    if (jid.endsWith('@lid')) {
+      const phone = session.lidToPhone.get(jid)
+      if (phone) {
+        targetJid = `${phone}@s.whatsapp.net`
+        console.log(`[${pastorId}] send-jid: resolved ${jid} → ${targetJid}`)
+      } else {
+        // Try using the LID directly — Baileys may handle it internally
+        console.log(`[${pastorId}] send-jid: LID ${jid} not in contacts map, trying as-is`)
+      }
+    }
+    await session.socket.sendMessage(targetJid, { text: message })
+    res.json({ ok: true, jid: targetJid })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
