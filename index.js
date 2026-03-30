@@ -130,6 +130,7 @@ async function createSession(pastorId) {
     qr: null,
     qrDataUrl: null,
     status: 'initializing',
+    lidToPhone: new Map(), // maps @lid JID → phone number
     phone: null,
     error: null,
     manualDisconnect: false,
@@ -164,6 +165,26 @@ async function createSession(pastorId) {
 
     socket.ev.on('creds.update', saveCreds)
 
+    // Build LID → phone mapping from contacts
+    socket.ev.on('contacts.upsert', (contacts) => {
+      for (const contact of contacts) {
+        const phone = contact.id?.replace('@s.whatsapp.net', '')
+        const lid = contact.lid?.replace('@lid', '')
+        if (phone && lid) {
+          session.lidToPhone.set(`${lid}@lid`, phone)
+        }
+      }
+    })
+    socket.ev.on('contacts.update', (updates) => {
+      for (const update of updates) {
+        const phone = update.id?.replace('@s.whatsapp.net', '')
+        const lid = update.lid?.replace('@lid', '')
+        if (phone && lid) {
+          session.lidToPhone.set(`${lid}@lid`, phone)
+        }
+      }
+    })
+
     socket.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
       console.log(`[${pastorId}] messages.upsert fired: type=${type} count=${msgs.length}`)
       for (const msg of msgs) {
@@ -173,7 +194,17 @@ async function createSession(pastorId) {
         console.log(`[${pastorId}] msg: fromMe=${fromMe} jid=${remoteJid} text=${text?.slice(0, 50)}`)
         if (fromMe) continue
         if (remoteJid.endsWith('@g.us')) continue
-        const from = remoteJid.replace('@s.whatsapp.net', '')
+        // Resolve @lid JID to phone number using contacts map
+        let from = remoteJid.replace('@s.whatsapp.net', '')
+        if (remoteJid.endsWith('@lid')) {
+          const resolvedPhone = session.lidToPhone.get(remoteJid)
+          if (resolvedPhone) {
+            from = resolvedPhone
+            console.log(`[${pastorId}] Resolved LID ${remoteJid} → ${from}`)
+          } else {
+            console.log(`[${pastorId}] LID ${remoteJid} not yet in contacts map`)
+          }
+        }
         if (!from) continue
         logMessage(pastorId, from, text || '(no text)')
         if (!text) continue
@@ -185,7 +216,7 @@ async function createSession(pastorId) {
                 'Content-Type': 'application/json',
                 ...(API_SECRET ? { 'x-gateway-secret': API_SECRET } : {}),
               },
-              body: JSON.stringify({ pastorId, from, text, replyJid: remoteJid }),
+              body: JSON.stringify({ pastorId, from, text, replyJid: remoteJid, fromLid: remoteJid.endsWith('@lid') }),
             })
           } catch (err) {
             console.error(`[${pastorId}] Failed to forward incoming message:`, err.message)
