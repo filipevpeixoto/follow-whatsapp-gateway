@@ -77,6 +77,32 @@ function getSession(pastorId) {
   return sessions.get(pastorId) || null
 }
 
+async function sendMessageWithOptionalUrlButton(socket, jid, { message, buttonBody, buttonText, buttonUrl }) {
+  if (!buttonUrl) {
+    await socket.sendMessage(jid, { text: message })
+    return
+  }
+
+  try {
+    await socket.sendMessage(jid, {
+      text: buttonBody || message,
+      footer: 'Follow',
+      templateButtons: [
+        {
+          index: 1,
+          urlButton: {
+            displayText: buttonText || 'Voltar',
+            url: buttonUrl,
+          },
+        },
+      ],
+    })
+  } catch (err) {
+    console.warn(`Falha ao enviar botão do WhatsApp, usando texto com link: ${err.message}`)
+    await socket.sendMessage(jid, { text: message })
+  }
+}
+
 function getSessionDir(pastorId) {
   return path.join(AUTH_DIR, `session-${pastorId}`)
 }
@@ -377,7 +403,7 @@ app.post('/session/disconnect', async (req, res) => {
 })
 
 app.post('/send', async (req, res) => {
-  const { pastorId, phone, message } = req.body
+  const { pastorId, phone, message, buttonBody, buttonText, buttonUrl } = req.body
   if (!pastorId || !phone || !message) {
     return res.status(400).json({ error: 'pastorId, phone e message são obrigatórios' })
   }
@@ -389,7 +415,7 @@ app.post('/send', async (req, res) => {
 
   try {
     const jid = await resolveTargetJid(session.socket, phone)
-    await session.socket.sendMessage(jid, { text: message })
+    await sendMessageWithOptionalUrlButton(session.socket, jid, { message, buttonBody, buttonText, buttonUrl })
     res.json({ ok: true, jid })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -397,7 +423,7 @@ app.post('/send', async (req, res) => {
 })
 
 app.post('/send-jid', async (req, res) => {
-  const { pastorId, jid, message } = req.body
+  const { pastorId, jid, message, buttonBody, buttonText, buttonUrl } = req.body
   if (!pastorId || !jid || !message) {
     return res.status(400).json({ error: 'pastorId, jid e message são obrigatórios' })
   }
@@ -418,7 +444,7 @@ app.post('/send-jid', async (req, res) => {
         console.log(`[${pastorId}] send-jid: LID ${jid} not in contacts map, trying as-is`)
       }
     }
-    await session.socket.sendMessage(targetJid, { text: message })
+    await sendMessageWithOptionalUrlButton(session.socket, targetJid, { message, buttonBody, buttonText, buttonUrl })
     res.json({ ok: true, jid: targetJid })
   } catch (err) {
     res.status(500).json({ error: err.message })
