@@ -23,7 +23,7 @@ app.use(cors())
 app.use(express.json())
 
 const PORT = process.env.PORT || 3002
-const API_SECRET = process.env.GATEWAY_SECRET || ''
+const API_SECRET = normalizeEnvSecret(process.env.GATEWAY_SECRET || process.env.GATEWAY_API_SECRET || '')
 const AUTH_DIR = process.env.AUTH_DIR || './.wwebjs_auth'
 const MANUAL_DISCONNECT_GRACE_MS = Number(process.env.MANUAL_DISCONNECT_GRACE_MS || 1500)
 const PAIRING_ACTIVITY_GRACE_MS = Number(process.env.PAIRING_ACTIVITY_GRACE_MS || 60_000)
@@ -33,9 +33,13 @@ const logger = pino({ level: 'warn' })
 
 // ── Auth middleware ──────────────────────────────────────────────────────────
 
+function normalizeEnvSecret(value) {
+  return String(value || '').replace(/\\n/g, '').trim()
+}
+
 function authMiddleware(req, res, next) {
   if (!API_SECRET) return next()
-  const token = req.headers['x-gateway-secret']
+  const token = normalizeEnvSecret(req.headers['x-gateway-secret'])
   if (token !== API_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' })
   }
