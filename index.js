@@ -26,6 +26,7 @@ const PORT = process.env.PORT || 3002
 const API_SECRET = process.env.GATEWAY_SECRET || ''
 const AUTH_DIR = process.env.AUTH_DIR || './.wwebjs_auth'
 const MANUAL_DISCONNECT_GRACE_MS = Number(process.env.MANUAL_DISCONNECT_GRACE_MS || 1500)
+const PAIRING_ACTIVITY_GRACE_MS = Number(process.env.PAIRING_ACTIVITY_GRACE_MS || 60_000)
 const BACKEND_URL = process.env.BACKEND_URL || ''
 
 const logger = pino({ level: 'warn' })
@@ -180,6 +181,8 @@ async function createSession(pastorId) {
     phone: null,
     error: null,
     manualDisconnect: false,
+    lastQrAt: null,
+    lastCredsUpdateAt: null,
   }
   sessions.set(pastorId, session)
 
@@ -209,7 +212,14 @@ async function createSession(pastorId) {
 
     session.socket = socket
 
-    socket.ev.on('creds.update', saveCreds)
+    socket.ev.on('creds.update', async () => {
+      session.lastCredsUpdateAt = Date.now()
+      try {
+        await saveCreds()
+      } catch (err) {
+        console.error(`[${pastorId}] Failed to save credentials:`, err.message)
+      }
+    })
 
     // Build LID → phone mapping from contacts
     socket.ev.on('contacts.upsert', (contacts) => {
@@ -284,6 +294,7 @@ async function createSession(pastorId) {
         session.qr = qrCode
         session.status = 'qr'
         session.error = null
+        session.lastQrAt = Date.now()
         try {
           session.qrDataUrl = await QRCode.toDataURL(qrCode, { width: 300, margin: 2 })
         } catch {
@@ -311,10 +322,18 @@ async function createSession(pastorId) {
         // 401 = loggedOut. But if we never connected (phone is null), it just means
         // the QR codes expired — we should retry, not give up.
         const wasEverConnected = Boolean(session.phone)
+        const hasRecentPairingActivity =
+          Boolean(session.lastCredsUpdateAt) &&
+          Boolean(session.lastQrAt) &&
+          session.lastCredsUpdateAt >= session.lastQrAt &&
+          Date.now() - session.lastCredsUpdateAt < PAIRING_ACTIVITY_GRACE_MS
         const shouldReconnect = !session.manualDisconnect &&
           (statusCode !== DisconnectReason.loggedOut || !wasEverConnected)
 
-        console.log(`[${pastorId}] Connection closed. Status: ${statusCode}. Reconnect: ${shouldReconnect}. WasConnected: ${wasEverConnected}`)
+        console.log(
+          `[${pastorId}] Connection closed. Status: ${statusCode}. Reconnect: ${shouldReconnect}. ` +
+          `WasConnected: ${wasEverConnected}. RecentPairingActivity: ${hasRecentPairingActivity}`,
+        )
 
         if (!isCurrentSession) {
           return
@@ -328,10 +347,10 @@ async function createSession(pastorId) {
         if (shouldReconnect) {
           // Reconnect — remove old session object and recreate
           sessions.delete(pastorId)
-          // Only clear persisted auth if QR expired (401 without ever connecting).
-          // For other errors (515 stream, network, etc.) keep auth files so the
-          // handshake can resume without requiring a new QR scan.
-          if (statusCode === DisconnectReason.loggedOut && !wasEverConnected) {
+          // Only clear persisted auth if the QR really expired. When the phone scans
+          // the QR, Baileys may persist fresh credentials before the first "open";
+          // clearing them on a transient 401 forces the UI to show a brand-new QR.
+          if (statusCode === DisconnectReason.loggedOut && !wasEverConnected && !hasRecentPairingActivity) {
             await clearPersistedSession(pastorId)
           }
           setTimeout(() => createSession(pastorId), 2000)
