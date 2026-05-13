@@ -8,6 +8,7 @@ RUN git config --global url."https://github.com/".insteadOf "ssh://git@github.co
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
+COPY scripts ./scripts
 RUN npm install --omit=dev
 
 COPY . .
