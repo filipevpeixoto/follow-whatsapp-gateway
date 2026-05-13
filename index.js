@@ -21,7 +21,7 @@ const {
 
 const app = express()
 app.use(cors())
-app.use(express.json())
+app.use(express.json({ limit: '80mb' }))
 
 const PORT = process.env.PORT || 3002
 const API_SECRET = normalizeEnvSecret(process.env.GATEWAY_SECRET || process.env.GATEWAY_API_SECRET || '')
@@ -83,15 +83,56 @@ function getSession(pastorId) {
   return sessions.get(pastorId) || null
 }
 
-async function sendMessageWithOptionalUrlButton(socket, jid, { message, buttonBody, buttonText, buttonUrl }) {
+function parseDataUrl(dataUrl) {
+  const match = /^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/i.exec(String(dataUrl || ''))
+  if (!match) throw new Error('Anexo inválido.')
+  return {
+    mimeType: match[1] || 'application/octet-stream',
+    buffer: Buffer.from(match[2], 'base64'),
+  }
+}
+
+async function sendAttachment(socket, jid, attachment, caption = '') {
+  const { mimeType, buffer } = parseDataUrl(attachment.dataUrl)
+  const fileName = attachment.name || 'anexo'
+  if (mimeType.startsWith('image/')) {
+    await socket.sendMessage(jid, { image: buffer, caption, mimetype: mimeType })
+    return
+  }
+  if (mimeType.startsWith('video/')) {
+    await socket.sendMessage(jid, { video: buffer, caption, mimetype: mimeType })
+    return
+  }
+  if (mimeType.startsWith('audio/')) {
+    await socket.sendMessage(jid, { audio: buffer, mimetype: mimeType })
+    if (caption) await socket.sendMessage(jid, { text: caption })
+    return
+  }
+  await socket.sendMessage(jid, { document: buffer, fileName, mimetype: mimeType, caption })
+}
+
+async function sendMessageWithOptionalUrlButton(
+  socket,
+  jid,
+  { message = '', buttonBody, buttonText, buttonUrl, attachments = [] },
+) {
+  const text = String(message || '').trim()
+  const validAttachments = Array.isArray(attachments) ? attachments : []
+  if (validAttachments.length > 0) {
+    for (const [index, attachment] of validAttachments.entries()) {
+      await sendAttachment(socket, jid, attachment, index === 0 ? text : '')
+      await sleep(350)
+    }
+    return
+  }
   if (!buttonUrl) {
-    await socket.sendMessage(jid, { text: message })
+    await socket.sendMessage(jid, { text })
     return
   }
 
   try {
     await socket.sendMessage(jid, {
-      text: buttonBody || message,
+      text: buttonBody || text,
       footer: 'Follow',
       templateButtons: [
         {
@@ -105,7 +146,7 @@ async function sendMessageWithOptionalUrlButton(socket, jid, { message, buttonBo
     })
   } catch (err) {
     console.warn(`Falha ao enviar botão do WhatsApp, usando texto com link: ${err.message}`)
-    await socket.sendMessage(jid, { text: message })
+    await socket.sendMessage(jid, { text })
   }
 }
 
@@ -430,9 +471,9 @@ app.post('/session/disconnect', async (req, res) => {
 })
 
 app.post('/send', async (req, res) => {
-  const { pastorId, phone, message, buttonBody, buttonText, buttonUrl } = req.body
-  if (!pastorId || !phone || !message) {
-    return res.status(400).json({ error: 'pastorId, phone e message são obrigatórios' })
+  const { pastorId, phone, message, buttonBody, buttonText, buttonUrl, attachments = [] } = req.body
+  if (!pastorId || !phone || (!String(message || '').trim() && !attachments.length)) {
+    return res.status(400).json({ error: 'pastorId, phone e mensagem ou anexo são obrigatórios' })
   }
 
   const session = getSession(pastorId)
@@ -442,7 +483,7 @@ app.post('/send', async (req, res) => {
 
   try {
     const jid = await resolveTargetJid(session.socket, phone)
-    await sendMessageWithOptionalUrlButton(session.socket, jid, { message, buttonBody, buttonText, buttonUrl })
+    await sendMessageWithOptionalUrlButton(session.socket, jid, { message, buttonBody, buttonText, buttonUrl, attachments })
     res.json({ ok: true, jid })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -450,9 +491,9 @@ app.post('/send', async (req, res) => {
 })
 
 app.post('/send-jid', async (req, res) => {
-  const { pastorId, jid, message, buttonBody, buttonText, buttonUrl } = req.body
-  if (!pastorId || !jid || !message) {
-    return res.status(400).json({ error: 'pastorId, jid e message são obrigatórios' })
+  const { pastorId, jid, message, buttonBody, buttonText, buttonUrl, attachments = [] } = req.body
+  if (!pastorId || !jid || (!String(message || '').trim() && !attachments.length)) {
+    return res.status(400).json({ error: 'pastorId, jid e mensagem ou anexo são obrigatórios' })
   }
   const session = getSession(pastorId)
   if (!session || session.status !== 'ready') {
@@ -471,7 +512,13 @@ app.post('/send-jid', async (req, res) => {
         console.log(`[${pastorId}] send-jid: LID ${jid} not in contacts map, trying as-is`)
       }
     }
-    await sendMessageWithOptionalUrlButton(session.socket, targetJid, { message, buttonBody, buttonText, buttonUrl })
+    await sendMessageWithOptionalUrlButton(session.socket, targetJid, {
+      message,
+      buttonBody,
+      buttonText,
+      buttonUrl,
+      attachments,
+    })
     res.json({ ok: true, jid: targetJid })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -479,9 +526,9 @@ app.post('/send-jid', async (req, res) => {
 })
 
 app.post('/broadcast', async (req, res) => {
-  const { pastorId, targets, message } = req.body
-  if (!pastorId || !targets || !message) {
-    return res.status(400).json({ error: 'pastorId, targets e message são obrigatórios' })
+  const { pastorId, targets, message, attachments = [] } = req.body
+  if (!pastorId || !targets || (!String(message || '').trim() && !attachments.length)) {
+    return res.status(400).json({ error: 'pastorId, targets e mensagem ou anexo são obrigatórios' })
   }
 
   const session = getSession(pastorId)
@@ -496,7 +543,7 @@ app.post('/broadcast', async (req, res) => {
   for (const target of targets) {
     try {
       const jid = await resolveTargetJid(session.socket, target.phone)
-      await session.socket.sendMessage(jid, { text: message })
+      await sendMessageWithOptionalUrlButton(session.socket, jid, { message, attachments })
       sent++
     } catch (err) {
       failed++
