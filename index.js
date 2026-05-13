@@ -16,6 +16,7 @@ const {
   makeCacheableSignalKeyStore,
   extractMessageContent,
   getContentType,
+  Browsers,
 } = baileys
 
 const app = express()
@@ -210,7 +211,10 @@ async function createSession(pastorId) {
       },
       logger,
       printQRInTerminal: false,
-      browser: ['Follow', 'Chrome', '125.0.0'],
+      browser: Browsers.macOS('Chrome'),
+      fireInitQueries: false,
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
       generateHighQualityLinkPreview: false,
     })
 
