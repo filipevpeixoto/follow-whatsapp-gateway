@@ -29,7 +29,8 @@ const API_SECRET = normalizeEnvSecret(process.env.GATEWAY_SECRET || process.env.
 const AUTH_DIR = process.env.AUTH_DIR || './.wwebjs_auth'
 const MANUAL_DISCONNECT_GRACE_MS = Number(process.env.MANUAL_DISCONNECT_GRACE_MS || 1500)
 const PAIRING_ACTIVITY_GRACE_MS = Number(process.env.PAIRING_ACTIVITY_GRACE_MS || 60_000)
-const BACKEND_URL = process.env.BACKEND_URL || ''
+const DEFAULT_BACKEND_URL = 'https://follow-app.onrender.com/api'
+const BACKEND_URL = normalizeBackendUrl(process.env.BACKEND_URL || DEFAULT_BACKEND_URL)
 
 const logger = pino({ level: 'warn' })
 
@@ -37,6 +38,15 @@ const logger = pino({ level: 'warn' })
 
 function normalizeEnvSecret(value) {
   return String(value || '').replace(/\\n/g, '').trim()
+}
+
+function normalizeBackendUrl(value) {
+  const normalized = normalizeEnvSecret(value)
+  if (!normalized || normalized === 'https://followasrs.vercel.app/api') {
+    return DEFAULT_BACKEND_URL
+  }
+
+  return normalized.replace(/\/+$/, '')
 }
 
 function authMiddleware(req, res, next) {
