@@ -16,6 +16,7 @@ const {
   makeCacheableSignalKeyStore,
   extractMessageContent,
   getContentType,
+  downloadContentFromMessage,
   Browsers,
 } = baileys
 
@@ -77,6 +78,42 @@ function extractTextFromMessage(message) {
     ''
 
   return { text: text.trim(), contentType }
+}
+
+function isCopaDoBemText(text) {
+  const normalized = String(text || '')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}+/gu, '')
+    .toLowerCase()
+  return /copa\s*do\s*bem/.test(normalized) || /benzitos?/.test(normalized) || /ficha/.test(normalized)
+}
+
+async function extractMediaPayload(message) {
+  const content = extractMessageContent(message)
+  const contentType = getContentType(content)
+  const mediaMessage =
+    contentType === 'imageMessage'
+      ? content.imageMessage
+      : contentType === 'documentMessage'
+        ? content.documentMessage
+        : null
+  if (!mediaMessage) return null
+
+  const stream = await downloadContentFromMessage(
+    mediaMessage,
+    contentType === 'imageMessage' ? 'image' : 'document',
+  )
+  const chunks = []
+  for await (const chunk of stream) {
+    chunks.push(chunk)
+  }
+  const buffer = Buffer.concat(chunks)
+  const mimeType = mediaMessage.mimetype || (contentType === 'imageMessage' ? 'image/jpeg' : 'application/pdf')
+  return {
+    dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
+    mimeType,
+    fileName: mediaMessage.fileName || null,
+  }
 }
 
 function getSession(pastorId) {
@@ -314,7 +351,15 @@ async function createSession(pastorId) {
         }
         if (!from) continue
         logMessage(pastorId, from, text || `(no text:${contentType || 'unknown'})`)
-        if (!text) {
+        let media = null
+        if ((contentType === 'imageMessage' || contentType === 'documentMessage') && isCopaDoBemText(text)) {
+          try {
+            media = await extractMediaPayload(msg.message)
+          } catch (err) {
+            console.error(`[${pastorId}] Failed to download incoming media:`, err.message)
+          }
+        }
+        if (!text && !media) {
           console.log(`[${pastorId}] Ignoring non-text message from ${remoteJid} (type=${contentType || 'unknown'})`)
           continue
         }
@@ -326,7 +371,7 @@ async function createSession(pastorId) {
                 'Content-Type': 'application/json',
                 ...(API_SECRET ? { 'x-gateway-secret': API_SECRET } : {}),
               },
-              body: JSON.stringify({ pastorId, from, text, replyJid: remoteJid }),
+              body: JSON.stringify({ pastorId, from, text, replyJid: remoteJid, ...(media ? { media } : {}) }),
             })
             console.log(`[${pastorId}] Forwarded incoming message to backend: status=${response.status} from=${from}`)
           } catch (err) {
